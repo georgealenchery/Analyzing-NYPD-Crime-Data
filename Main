@@ -1,0 +1,570 @@
+# ============================================================
+# IDC 3140 DATA SCIENCE PROJECT
+# Project Title:
+# Predicting NYPD Arrest Severity Category from Arrest Data
+#
+# Dataset:
+# NYPD Arrest Data (Year to Date)
+#
+# This notebook includes:
+# 1. Raw data inspection
+# 2. Data cleaning and preprocessing
+# 3. SQL querying and analysis
+# 4. Feature engineering
+# 5. Data visualization
+# 6. Machine learning model training
+# 7. Model evaluation
+# 8. Error handling and reusable functions/classes
+#
+# NOTE:
+# Upload the CSV file to Colab before running:
+# "NYPD_Arrest_Data__Year_to_Date_.csv"
+# ============================================================
+
+# =========================
+# 1. INSTALL / IMPORTS
+# =========================
+!pip -q install pandasql
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import io
+import sqlite3
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from google.colab import files
+from pandasql import sqldf
+
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder, StandardScaler
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    ConfusionMatrixDisplay
+)
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+
+# =========================
+# 2. PROJECT CONFIG
+# =========================
+RANDOM_STATE = 42
+TARGET_COLUMN = "LAW_CAT_CD"
+
+# Restrict target to the main legal categories so the classification task is cleaner
+VALID_TARGETS = ["F", "M", "V"]   # F = Felony, M = Misdemeanor, V = Violation
+
+# =========================
+# 3. HELPER CLASS
+# =========================
+class NYPDArrestProject:
+    def __init__(self):
+        self.df_raw = None
+        self.df = None
+        self.df_model = None
+        self.label_encoder = LabelEncoder()
+        self.preprocessor = None
+        self.models = {}
+        self.results = {}
+
+    def load_data(self, filename=None):
+        """
+        Loads the dataset from an uploaded CSV file.
+        """
+        try:
+            if filename is None:
+                print("Please upload the CSV file now...")
+                uploaded = files.upload()
+                if len(uploaded) == 0:
+                    raise FileNotFoundError("No file was uploaded.")
+                filename = list(uploaded.keys())[0]
+
+            self.df_raw = pd.read_csv(filename)
+            self.df = self.df_raw.copy()
+
+            print("Dataset loaded successfully.")
+            print(f"Shape: {self.df.shape}")
+            print(f"Columns: {list(self.df.columns)}")
+        except Exception as e:
+            print(f"Error while loading data: {e}")
+            raise
+
+    def inspect_data(self):
+        """
+        Performs raw data inspection.
+        """
+        print("\n================ RAW DATA PREVIEW ================\n")
+        display(self.df.head())
+
+        print("\n================ DATA TYPES ================\n")
+        print(self.df.dtypes)
+
+        print("\n================ MISSING VALUES ================\n")
+        display(self.df.isnull().sum().sort_values(ascending=False))
+
+        print("\n================ DUPLICATES ================\n")
+        print(f"Duplicate rows: {self.df.duplicated().sum()}")
+
+        print("\n================ DESCRIPTIVE STATS ================\n")
+        display(self.df.describe(include="all").T)
+
+    def clean_data(self):
+        """
+        Cleans the dataset and performs basic preprocessing.
+        """
+        df = self.df.copy()
+
+        # Remove exact duplicates
+        df = df.drop_duplicates()
+
+        # Convert date column
+        df["ARREST_DATE"] = pd.to_datetime(df["ARREST_DATE"], errors="coerce")
+
+        # Standardize string columns
+        string_cols = df.select_dtypes(include="object").columns
+        for col in string_cols:
+            df[col] = df[col].astype(str).str.strip()
+
+        # Replace common string versions of missing values
+        df.replace(["nan", "None", "NULL", ""], np.nan, inplace=True)
+
+        # Filter target to main categories only
+        df = df[df[TARGET_COLUMN].isin(VALID_TARGETS)].copy()
+
+        # Remove rows missing key features
+        essential_cols = [
+            "ARREST_DATE", "ARREST_BORO", "ARREST_PRECINCT",
+            "AGE_GROUP", "PERP_SEX", "PERP_RACE", "OFNS_DESC", TARGET_COLUMN
+        ]
+        df = df.dropna(subset=essential_cols)
+
+        # Remove clearly invalid coordinates if needed
+        # (keep as-is, but create derived features carefully)
+        # Create date/time features
+        df["ARREST_YEAR"] = df["ARREST_DATE"].dt.year
+        df["ARREST_MONTH"] = df["ARREST_DATE"].dt.month
+        df["ARREST_DAY"] = df["ARREST_DATE"].dt.day
+        df["ARREST_DAYOFWEEK"] = df["ARREST_DATE"].dt.day_name()
+        df["ARREST_WEEKDAY_NUM"] = df["ARREST_DATE"].dt.weekday
+        df["IS_WEEKEND"] = df["ARREST_WEEKDAY_NUM"].isin([5, 6]).astype(int)
+
+        # Optional coordinate cleanup
+        if "Latitude" in df.columns:
+            df["Latitude"] = pd.to_numeric(df["Latitude"], errors="coerce")
+        if "Longitude" in df.columns:
+            df["Longitude"] = pd.to_numeric(df["Longitude"], errors="coerce")
+        if "ARREST_PRECINCT" in df.columns:
+            df["ARREST_PRECINCT"] = pd.to_numeric(df["ARREST_PRECINCT"], errors="coerce")
+        if "JURISDICTION_CODE" in df.columns:
+            df["JURISDICTION_CODE"] = pd.to_numeric(df["JURISDICTION_CODE"], errors="coerce")
+        if "KY_CD" in df.columns:
+            df["KY_CD"] = pd.to_numeric(df["KY_CD"], errors="coerce")
+        if "PD_CD" in df.columns:
+            df["PD_CD"] = pd.to_numeric(df["PD_CD"], errors="coerce")
+
+        self.df = df
+        print("Data cleaned successfully.")
+        print(f"Cleaned dataset shape: {self.df.shape}")
+
+    def exploratory_analysis(self):
+        """
+        Basic EDA and plots.
+        """
+        df = self.df.copy()
+
+        print("\n================ TARGET DISTRIBUTION ================\n")
+        display(df[TARGET_COLUMN].value_counts())
+
+        print("\n================ BOROUGH DISTRIBUTION ================\n")
+        display(df["ARREST_BORO"].value_counts())
+
+        print("\n================ AGE GROUP DISTRIBUTION ================\n")
+        display(df["AGE_GROUP"].value_counts())
+
+        print("\n================ SEX DISTRIBUTION ================\n")
+        display(df["PERP_SEX"].value_counts())
+
+        print("\n================ RACE DISTRIBUTION ================\n")
+        display(df["PERP_RACE"].value_counts().head(10))
+
+        # Plot 1: Arrest category counts
+        plt.figure(figsize=(8, 5))
+        df[TARGET_COLUMN].value_counts().plot(kind="bar")
+        plt.title("Arrest Legal Category Distribution")
+        plt.xlabel("Legal Category")
+        plt.ylabel("Count")
+        plt.xticks(rotation=0)
+        plt.show()
+
+        # Plot 2: Top 10 offense descriptions
+        plt.figure(figsize=(12, 6))
+        df["OFNS_DESC"].value_counts().head(10).plot(kind="bar")
+        plt.title("Top 10 Offense Descriptions")
+        plt.xlabel("Offense Description")
+        plt.ylabel("Count")
+        plt.xticks(rotation=45, ha="right")
+        plt.show()
+
+        # Plot 3: Borough distribution
+        plt.figure(figsize=(8, 5))
+        df["ARREST_BORO"].value_counts().plot(kind="bar")
+        plt.title("Arrests by Borough")
+        plt.xlabel("Borough")
+        plt.ylabel("Count")
+        plt.xticks(rotation=0)
+        plt.show()
+
+        # Plot 4: Arrests by day of week
+        day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        arrests_by_day = df["ARREST_DAYOFWEEK"].value_counts().reindex(day_order)
+        plt.figure(figsize=(10, 5))
+        arrests_by_day.plot(kind="bar")
+        plt.title("Arrests by Day of Week")
+        plt.xlabel("Day of Week")
+        plt.ylabel("Count")
+        plt.xticks(rotation=45)
+        plt.show()
+
+        # Plot 5: Top precincts
+        plt.figure(figsize=(12, 6))
+        df["ARREST_PRECINCT"].value_counts().head(15).plot(kind="bar")
+        plt.title("Top 15 Precincts by Arrest Count")
+        plt.xlabel("Precinct")
+        plt.ylabel("Count")
+        plt.xticks(rotation=45)
+        plt.show()
+
+    def run_sql_analysis(self):
+        """
+        Runs SQL queries on the dataframe.
+        """
+        df = self.df.copy()
+        print("\n================ SQL ANALYSIS ================\n")
+
+        # Query 1: Arrest count by borough
+        query1 = """
+        SELECT
+            ARREST_BORO,
+            COUNT(*) AS total_arrests
+        FROM df
+        GROUP BY ARREST_BORO
+        ORDER BY total_arrests DESC
+        """
+        print("Query 1: Total arrests by borough")
+        display(sqldf(query1, {"df": df}))
+
+        # Query 2: Average precinct counts per legal category
+        query2 = """
+        SELECT
+            LAW_CAT_CD,
+            COUNT(*) AS total_cases
+        FROM df
+        GROUP BY LAW_CAT_CD
+        ORDER BY total_cases DESC
+        """
+        print("Query 2: Arrest counts by legal category")
+        display(sqldf(query2, {"df": df}))
+
+        # Query 3: Top offenses
+        query3 = """
+        SELECT
+            OFNS_DESC,
+            COUNT(*) AS offense_count
+        FROM df
+        GROUP BY OFNS_DESC
+        ORDER BY offense_count DESC
+        LIMIT 10
+        """
+        print("Query 3: Top 10 offense descriptions")
+        display(sqldf(query3, {"df": df}))
+
+        # Query 4: Arrests by sex and category
+        query4 = """
+        SELECT
+            PERP_SEX,
+            LAW_CAT_CD,
+            COUNT(*) AS total
+        FROM df
+        GROUP BY PERP_SEX, LAW_CAT_CD
+        ORDER BY PERP_SEX, total DESC
+        """
+        print("Query 4: Arrests by sex and legal category")
+        display(sqldf(query4, {"df": df}))
+
+        # Query 5: Weekend vs weekday
+        query5 = """
+        SELECT
+            IS_WEEKEND,
+            COUNT(*) AS total_arrests
+        FROM df
+        GROUP BY IS_WEEKEND
+        """
+        print("Query 5: Weekend vs weekday arrests")
+        display(sqldf(query5, {"df": df}))
+
+    def prepare_model_data(self):
+        """
+        Selects features and prepares data for machine learning.
+        """
+        df = self.df.copy()
+
+        feature_cols = [
+            "PD_CD",
+            "KY_CD",
+            "OFNS_DESC",
+            "ARREST_BORO",
+            "ARREST_PRECINCT",
+            "JURISDICTION_CODE",
+            "AGE_GROUP",
+            "PERP_SEX",
+            "PERP_RACE",
+            "ARREST_MONTH",
+            "ARREST_DAY",
+            "ARREST_WEEKDAY_NUM",
+            "IS_WEEKEND",
+            "Latitude",
+            "Longitude"
+        ]
+
+        # Keep only columns that actually exist
+        feature_cols = [col for col in feature_cols if col in df.columns]
+
+        model_df = df[feature_cols + [TARGET_COLUMN]].copy()
+
+        # Drop rows with missing target
+        model_df = model_df.dropna(subset=[TARGET_COLUMN])
+
+        self.df_model = model_df
+        print("Modeling dataframe prepared.")
+        print(f"Shape: {self.df_model.shape}")
+        print(f"Features used: {feature_cols}")
+
+    def build_preprocessor(self, X):
+        """
+        Builds the preprocessing pipeline.
+        """
+        categorical_cols = X.select_dtypes(include=["object"]).columns.tolist()
+        numeric_cols = X.select_dtypes(exclude=["object"]).columns.tolist()
+
+        numeric_transformer = Pipeline(steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler())
+        ])
+
+        categorical_transformer = Pipeline(steps=[
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OneHotEncoder(handle_unknown="ignore"))
+        ])
+
+        self.preprocessor = ColumnTransformer(
+            transformers=[
+                ("num", numeric_transformer, numeric_cols),
+                ("cat", categorical_transformer, categorical_cols)
+            ]
+        )
+
+    def train_models(self):
+        """
+        Trains multiple models and stores results.
+        """
+        df = self.df_model.copy()
+
+        X = df.drop(columns=[TARGET_COLUMN])
+        y = df[TARGET_COLUMN]
+
+        y_encoded = self.label_encoder.fit_transform(y)
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y_encoded,
+            test_size=0.2,
+            random_state=RANDOM_STATE,
+            stratify=y_encoded
+        )
+
+        self.build_preprocessor(X)
+
+        # Model 1: Logistic Regression
+        log_reg_pipeline = Pipeline(steps=[
+            ("preprocessor", self.preprocessor),
+            ("classifier", LogisticRegression(max_iter=1000))
+        ])
+
+        # Model 2: Random Forest
+        rf_pipeline = Pipeline(steps=[
+            ("preprocessor", self.preprocessor),
+            ("classifier", RandomForestClassifier(
+                n_estimators=150,
+                max_depth=None,
+                random_state=RANDOM_STATE,
+                n_jobs=-1
+            ))
+        ])
+
+        self.models = {
+            "Logistic Regression": log_reg_pipeline,
+            "Random Forest": rf_pipeline
+        }
+
+        for model_name, pipeline in self.models.items():
+            print(f"\nTraining {model_name}...")
+            pipeline.fit(X_train, y_train)
+            preds = pipeline.predict(X_test)
+            acc = accuracy_score(y_test, preds)
+
+            self.results[model_name] = {
+                "model": pipeline,
+                "accuracy": acc,
+                "y_test": y_test,
+                "preds": preds
+            }
+
+            print(f"{model_name} Accuracy: {acc:.4f}")
+
+    def evaluate_models(self):
+        """
+        Prints reports and confusion matrices.
+        """
+        for model_name, result in self.results.items():
+            print("\n" + "=" * 60)
+            print(f"MODEL EVALUATION: {model_name}")
+            print("=" * 60)
+
+            y_test = result["y_test"]
+            preds = result["preds"]
+
+            target_names = list(self.label_encoder.classes_)
+            print("\nClassification Report:")
+            print(classification_report(y_test, preds, target_names=target_names))
+
+            cm = confusion_matrix(y_test, preds)
+            disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=target_names)
+            disp.plot()
+            plt.title(f"Confusion Matrix - {model_name}")
+            plt.show()
+
+    def show_feature_importance(self):
+        """
+        Shows feature importances for Random Forest if available.
+        """
+        if "Random Forest" not in self.results:
+            print("Random Forest has not been trained yet.")
+            return
+
+        rf_pipeline = self.results["Random Forest"]["model"]
+
+        try:
+            preprocessor = rf_pipeline.named_steps["preprocessor"]
+            classifier = rf_pipeline.named_steps["classifier"]
+
+            # Get feature names after preprocessing
+            cat_features = preprocessor.transformers_[1][2]
+            num_features = preprocessor.transformers_[0][2]
+
+            ohe = preprocessor.named_transformers_["cat"].named_steps["onehot"]
+            ohe_feature_names = ohe.get_feature_names_out(cat_features)
+
+            all_feature_names = list(num_features) + list(ohe_feature_names)
+            importances = classifier.feature_importances_
+
+            feat_imp = pd.DataFrame({
+                "Feature": all_feature_names,
+                "Importance": importances
+            }).sort_values(by="Importance", ascending=False).head(20)
+
+            print("\nTop 20 Important Features (Random Forest):")
+            display(feat_imp)
+
+            plt.figure(figsize=(12, 6))
+            plt.barh(feat_imp["Feature"][::-1], feat_imp["Importance"][::-1])
+            plt.title("Top 20 Feature Importances - Random Forest")
+            plt.xlabel("Importance")
+            plt.ylabel("Feature")
+            plt.show()
+
+        except Exception as e:
+            print(f"Could not generate feature importance plot: {e}")
+
+    def run_sample_predictions(self, n=10):
+        """
+        Shows sample predictions for the best-performing model.
+        """
+        if len(self.results) == 0:
+            print("No trained models available.")
+            return
+
+        best_model_name = max(self.results, key=lambda m: self.results[m]["accuracy"])
+        print(f"Best model based on accuracy: {best_model_name}")
+
+        best_model = self.results[best_model_name]["model"]
+
+        df = self.df_model.copy()
+        X = df.drop(columns=[TARGET_COLUMN])
+        y = df[TARGET_COLUMN]
+
+        sample = X.sample(min(n, len(X)), random_state=RANDOM_STATE).copy()
+        predictions_encoded = best_model.predict(sample)
+        predictions = self.label_encoder.inverse_transform(predictions_encoded)
+
+        output = sample.copy()
+        output["Predicted_LAW_CAT_CD"] = predictions
+
+        print("\nSample Predictions:")
+        display(output.head(n))
+
+    def save_cleaned_data(self):
+        """
+        Saves cleaned dataset for reuse.
+        """
+        try:
+            self.df.to_csv("cleaned_nypd_arrest_data.csv", index=False)
+            print("Saved cleaned dataset as 'cleaned_nypd_arrest_data.csv'")
+        except Exception as e:
+            print(f"Error saving cleaned data: {e}")
+
+
+# =========================
+# 4. RUN THE FULL PROJECT
+# =========================
+project = NYPDArrestProject()
+
+# Upload and load data
+project.load_data()
+
+# Inspect raw data
+project.inspect_data()
+
+# Clean and preprocess
+project.clean_data()
+
+# Save cleaned version
+project.save_cleaned_data()
+
+# Exploratory analysis and charts
+project.exploratory_analysis()
+
+# SQL analysis
+project.run_sql_analysis()
+
+# Prepare model data
+project.prepare_model_data()
+
+# Train models
+project.train_models()
+
+# Evaluate models
+project.evaluate_models()
+
+# Feature importance
+project.show_feature_importance()
+
+# Sample predictions
+project.run_sample_predictions(n=10)
+
+print("\nProject pipeline completed successfully.")

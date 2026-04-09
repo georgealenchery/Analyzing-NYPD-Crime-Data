@@ -1,29 +1,17 @@
-# ============================================================
 # IDC 3140 DATA SCIENCE PROJECT
 # Project Title:
 # Predicting NYPD Arrest Severity Category from Arrest Data
 #
 # Dataset:
 # NYPD Arrest Data (Year to Date)
-#
-# This notebook includes:
-# 1. Raw data inspection
-# 2. Data cleaning and preprocessing
-# 3. SQL querying and analysis
-# 4. Feature engineering
-# 5. Data visualization
-# 6. Machine learning model training
-# 7. Model evaluation
-# 8. Error handling and reusable functions/classes
+# George Alenchery & Jorge Valdes
 #
 # NOTE:
 # Upload the CSV file to Colab before running:
 # "NYPD_Arrest_Data__Year_to_Date_.csv"
-# ============================================================
 
-# =========================
 # 1. INSTALL / IMPORTS
-# =========================
+
 !pip -q install pandasql
 
 import warnings
@@ -52,18 +40,14 @@ from sklearn.metrics import (
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 
-# =========================
-# 2. PROJECT CONFIG
-# =========================
+# PROJECT CONFIG
 RANDOM_STATE = 42
 TARGET_COLUMN = "LAW_CAT_CD"
 
 # Restrict target to the main legal categories so the classification task is cleaner
 VALID_TARGETS = ["F", "M", "V"]   # F = Felony, M = Misdemeanor, V = Violation
 
-# =========================
 # 3. HELPER CLASS
-# =========================
 class NYPDArrestProject:
     def __init__(self):
         self.df_raw = None
@@ -529,9 +513,7 @@ class NYPDArrestProject:
             print(f"Error saving cleaned data: {e}")
 
 
-# =========================
 # 4. RUN THE FULL PROJECT
-# =========================
 project = NYPDArrestProject()
 
 # Upload and load data
